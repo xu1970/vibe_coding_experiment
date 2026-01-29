@@ -1,20 +1,21 @@
 # Project title
+fertility desire text analysis
 
 ## What this is
-Short description.
+Scraped comments from bilibili videos and then conduct a text analysis on these comments. I selected one video that discusses why young adults in China had little motivation to have children. I hope to use text analysis to better understand the new ways young adults in China interpret childbearing and childrearing. I
 
 ## Structure
-- notebooks/: analysis notebooks
-- data/: (not committed) raw data
-- outputs/: figures/tables
+- notebooks/: Jieba-Parser-LDA-word2vec.ipynb 
+- data/:  comments_oid323836485.csv
+- outputs/: not included yet
 
 ## How to run
-- Python version:
-- Key dependencies:
-- Run notebooks in order: ...
+- Python version: Python 3.11.5
+- Key dependencies: jieba, emoji, re, pandas, stanza
+- Run notebooks in order:Jieba-Parser-LDA-word2vec.ipynb  
 
 ## What I want help with
-- refactor suggestions
-- reproducibility
-- speed / clarity
+- whether the sample is too small for text analysis
+- augment database suggestions
+- better analysis tools for the current sample
 - better modeling / evaluation
