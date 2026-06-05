@@ -28,9 +28,9 @@ from functions import add_replacements, add_words_from_file, replace_w_rules
 # ---------------------------------------------------------------------------
 DEFAULT_CONFIG: dict[str, Any] = {
     # --- Ingestion ---
-    "data_dir": "/Users/xiangningxu/Documents/vibe_coding/Scrape",
+    "data_dir": "/Users/xiangningxu/Documents/vibe_coding/Scraping",
     "file_pattern": "comments_sampled_*.csv",
-    "text_column": "content",
+    "text_column": "comment_text",
     "vote_values": None,  # e.g. [1, 2]; None keeps all rows
 
     # --- Resource files (paths relative to project root or absolute) ---
@@ -334,6 +334,15 @@ def preprocess_corpus(config: dict[str, Any] | None = None) -> dict[str, Any]:
         cfg,
         lda_vocab_exclude=lda_exclude if lda_exclude else None,
     )
+
+    # Align raw documents with corpus rows after LDA trim / empty-doc removal
+    aligned_comments: list[str] = []
+    for comment, tokens in zip(comments, tokenized_docs):
+        trimmed = [t for t in tokens if t not in lda_exclude] if lda_exclude else tokens
+        if cfg["drop_empty_docs"] and len(trimmed) < cfg["min_tokens_per_doc"]:
+            continue
+        aligned_comments.append(comment)
+    comments = aligned_comments
 
     stats = validate_corpus(dictionary, corpus, lda_docs)
 
