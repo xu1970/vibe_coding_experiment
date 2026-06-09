@@ -31,6 +31,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "data_dir": "/Users/xiangningxu/Documents/vibe_coding/Scraping",
     "file_pattern": "comments_sampled_*.csv",
     "text_column": "comment_text",
+    "likes_column": "numlikes",   # column for like-based corpus reweighting; None to skip
     "vote_values": None,  # e.g. [1, 2]; None keeps all rows
 
     # --- Resource files (paths relative to project root or absolute) ---
@@ -51,6 +52,13 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "simplify_traditional": True,
     "min_consecutive_dup_run": 3,  # collapse N+ identical consecutive tokens to one
     "bilibili_sticker_words": {"辣眼睛", "藏狐", "吃瓜"},
+
+    # --- Single-character token filter (before LDA vocabulary) ---
+    "filter_single_char_tokens": False,
+    "single_char_tokens_file": "single_char_tokens.txt",
+    "single_char_top_pct": 20,       # top N% freq: keep if in single_char_tokens_file
+    "single_char_mid_low_pct": 20,   # mid band lower bound (inclusive)
+    "single_char_mid_high_pct": 90,  # mid band upper bound (inclusive); keep if POS is adjective
 
     # --- Token / vocabulary filtering ---
     "min_token_freq": 2,          # keep tokens appearing more than this count corpus-wide
@@ -119,11 +127,14 @@ def _count_webpage_links(text: str) -> int:
 def prepare_comments(
     comments: list[str],
     config: dict[str, Any],
-) -> tuple[list[str], dict[str, int]]:
+    *,
+    likes: list[int] | None = None,
+) -> tuple[list[str], dict[str, int], list[int] | None]:
     """
     Drop emoji-heavy, multi-link, and duplicate comments before tokenization.
 
     Order: emoji filter, link filter, then deduplication (keeps first occurrence).
+    If ``likes`` is provided, it is filtered in parallel with ``comments``.
     """
     stats = {
         "n_loaded": len(comments),
@@ -132,40 +143,60 @@ def prepare_comments(
         "n_dropped_duplicates": 0,
         "n_kept": 0,
     }
+    track_likes = likes is not None
+    if track_likes and len(likes) != len(comments):
+        raise ValueError(
+            f"likes length ({len(likes)}) must match comments length ({len(comments)})"
+        )
 
     max_emojis = config.get("max_emojis_per_comment")
     if max_emojis is not None:
-        kept: list[str] = []
-        for comment in comments:
+        kept_comments: list[str] = []
+        kept_likes: list[int] = []
+        for i, comment in enumerate(comments):
             if _count_emojis(comment) > max_emojis:
                 stats["n_dropped_emojis"] += 1
             else:
-                kept.append(comment)
-        comments = kept
+                kept_comments.append(comment)
+                if track_likes:
+                    kept_likes.append(likes[i])
+        comments = kept_comments
+        if track_likes:
+            likes = kept_likes
 
     max_links = config.get("max_links_per_comment")
     if max_links is not None:
-        kept = []
-        for comment in comments:
+        kept_comments = []
+        kept_likes = []
+        for i, comment in enumerate(comments):
             if _count_webpage_links(comment) > max_links:
                 stats["n_dropped_multi_link"] += 1
             else:
-                kept.append(comment)
-        comments = kept
+                kept_comments.append(comment)
+                if track_likes:
+                    kept_likes.append(likes[i])
+        comments = kept_comments
+        if track_likes:
+            likes = kept_likes
 
     if config.get("deduplicate_comments", True):
         seen: set[str] = set()
         unique: list[str] = []
-        for comment in comments:
+        unique_likes: list[int] = []
+        for i, comment in enumerate(comments):
             if comment in seen:
                 stats["n_dropped_duplicates"] += 1
             else:
                 seen.add(comment)
                 unique.append(comment)
+                if track_likes:
+                    unique_likes.append(likes[i])
         comments = unique
+        if track_likes:
+            likes = unique_likes
 
     stats["n_kept"] = len(comments)
-    return comments, stats
+    return comments, stats, likes
 
 
 def _convert_emoji(sentence: str) -> str:
@@ -416,6 +447,89 @@ def strip_blocked_tokens(
     return [[t for t in doc if t not in blocked] for doc in tokenized_docs]
 
 
+def _freq_percentile_threshold(counts: list[int], percentile: float) -> float:
+    """Return the frequency value at the given percentile (0–100) of ``counts``."""
+    if not counts:
+        return 0.0
+    ordered = sorted(counts)
+    if len(ordered) == 1:
+        return float(ordered[0])
+    rank = (percentile / 100.0) * (len(ordered) - 1)
+    low = int(rank)
+    high = min(low + 1, len(ordered) - 1)
+    weight = rank - low
+    return ordered[low] * (1 - weight) + ordered[high] * weight
+
+
+def _jieba_pos(token: str) -> str:
+    tagged = list(pseg.cut(token))
+    return tagged[0].flag if tagged else ""
+
+
+def filter_single_char_tokens(
+    tokenized_docs: list[list[str]],
+    config: dict[str, Any],
+) -> tuple[list[list[str]], dict[str, int]]:
+    """
+    Keep single-character tokens only when they pass corpus-frequency rules:
+
+    - Top ``single_char_top_pct``% by frequency: keep if listed in single_char_tokens_file
+    - Middle ``single_char_mid_low_pct``–``single_char_mid_high_pct``%: keep if POS is adjective (a)
+    - All other single-character tokens are dropped
+  """
+    if not config.get("filter_single_char_tokens", False):
+        return tokenized_docs, {"n_single_char_dropped": 0, "n_single_char_kept": 0}
+
+    whitelist_path = config.get("single_char_tokens_file", "single_char_tokens.txt")
+    whitelist: set[str] = set()
+    if Path(whitelist_path).exists():
+        whitelist = set(_load_word_list(whitelist_path))
+
+    top_pct = config.get("single_char_top_pct", 20)
+    mid_low = config.get("single_char_mid_low_pct", 20)
+    mid_high = config.get("single_char_mid_high_pct", 90)
+    top_threshold_pct = 100 - top_pct  # e.g. top 20% → 80th percentile
+
+    flat = list(chain.from_iterable(tokenized_docs))
+    sc_counts = Counter(t for t in flat if len(t) == 1)
+    if not sc_counts:
+        return tokenized_docs, {"n_single_char_dropped": 0, "n_single_char_kept": 0}
+
+    count_values = list(sc_counts.values())
+    p_top = _freq_percentile_threshold(count_values, top_threshold_pct)
+    p_mid_low = _freq_percentile_threshold(count_values, mid_low)
+    p_mid_high = _freq_percentile_threshold(count_values, mid_high)
+
+    pos_cache: dict[str, str] = {}
+    allowed: set[str] = set()
+    for token, count in sc_counts.items():
+        if count >= p_top:
+            if token in whitelist:
+                allowed.add(token)
+        elif count >= p_mid_low and count <= p_mid_high:
+            if token not in pos_cache:
+                pos_cache[token] = _jieba_pos(token)
+            if pos_cache[token] == "a":
+                allowed.add(token)
+
+    dropped = kept = 0
+    filtered: list[list[str]] = []
+    for doc in tokenized_docs:
+        out: list[str] = []
+        for t in doc:
+            if len(t) == 1:
+                if t in allowed:
+                    out.append(t)
+                    kept += 1
+                else:
+                    dropped += 1
+            else:
+                out.append(t)
+        filtered.append(out)
+
+    return filtered, {"n_single_char_dropped": dropped, "n_single_char_kept": kept}
+
+
 def build_vocabulary(
     tokenized_docs: list[list[str]],
     config: dict[str, Any],
@@ -493,6 +607,7 @@ def preprocess_corpus(config: dict[str, Any] | None = None) -> dict[str, Any]:
     -------
     dict with keys:
         documents      – raw comment strings
+        document_likes – per-document like counts (aligned with corpus rows)
         tokenized_docs – list of token lists (post vocab filter)
         lda_docs       – token lists after lda_exclude_tokens (if any)
         dictionary     – gensim Dictionary
@@ -524,9 +639,17 @@ def preprocess_corpus(config: dict[str, Any] | None = None) -> dict[str, Any]:
     # 1. Ingestion
     df = load_documents(cfg)
     comments = df[cfg["text_column"]].astype(str).tolist()
+    likes_col = cfg.get("likes_column")
+    document_likes: list[int] | None = None
+    if likes_col and likes_col in df.columns:
+        document_likes = (
+            pd.to_numeric(df[likes_col], errors="coerce").fillna(0).astype(int).tolist()
+        )
 
     # 2. Drop emoji-heavy and duplicate comments before cleaning/tokenization
-    comments, filter_stats = prepare_comments(comments, cfg)
+    comments, filter_stats, document_likes = prepare_comments(
+        comments, cfg, likes=document_likes
+    )
 
     # 3. Tokenization
     raw_tokenized = tokenize_documents(
@@ -548,10 +671,13 @@ def preprocess_corpus(config: dict[str, Any] | None = None) -> dict[str, Any]:
         filtered_words=filtered_words,
     )
 
-    # 5. Vocabulary filter (corpus-wide frequency)
+    # 5. Single-character token filter (frequency percentile + whitelist / adjective)
+    raw_tokenized, sc_stats = filter_single_char_tokens(raw_tokenized, cfg)
+
+    # 6. Vocabulary filter (corpus-wide frequency)
     vocab, tokenized_docs = build_vocabulary(raw_tokenized, cfg)
 
-    # 6. LDA-specific vocabulary trim + Gensim objects
+    # 7. LDA-specific vocabulary trim + Gensim objects
     lda_exclude = set(cfg.get("lda_exclude_tokens") or [])
     dictionary, corpus, lda_docs = build_gensim_corpus(
         tokenized_docs,
@@ -561,18 +687,25 @@ def preprocess_corpus(config: dict[str, Any] | None = None) -> dict[str, Any]:
 
     # Align raw documents with corpus rows after LDA trim / empty-doc removal
     aligned_comments: list[str] = []
-    for comment, tokens in zip(comments, tokenized_docs):
+    aligned_likes: list[int] = []
+    for i, (comment, tokens) in enumerate(zip(comments, tokenized_docs)):
         trimmed = [t for t in tokens if t not in lda_exclude] if lda_exclude else tokens
         if cfg["drop_empty_docs"] and len(trimmed) < cfg["min_tokens_per_doc"]:
             continue
         aligned_comments.append(comment)
+        if document_likes is not None:
+            aligned_likes.append(document_likes[i])
     comments = aligned_comments
+    if document_likes is not None:
+        document_likes = aligned_likes
 
     stats = validate_corpus(dictionary, corpus, lda_docs)
     stats.update(filter_stats)
+    stats.update(sc_stats)
 
     return {
         "documents": comments,
+        "document_likes": document_likes,
         "tokenized_docs": tokenized_docs,
         "lda_docs": lda_docs,
         "dictionary": dictionary,

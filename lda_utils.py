@@ -30,6 +30,29 @@ class LDASettings:
     topn_docs_per_topic: int = 7
 
 
+def reweight_corpus_by_likes(
+    corpus: list[list[tuple[int, int]]],
+    likes: list[int],
+    *,
+    alpha: float = 0.1,
+) -> list[list[tuple[int, float]]]:
+    """
+    Scale each document's token weights by 1 + alpha * num_likes.
+
+    Applied to the BoW matrix before TF-IDF / LDA training.
+    """
+    if len(corpus) != len(likes):
+        raise ValueError(
+            f"corpus length ({len(corpus)}) must match likes length ({len(likes)})"
+        )
+
+    weighted: list[list[tuple[int, float]]] = []
+    for doc, n_likes in zip(corpus, likes):
+        weight = 1.0 + alpha * max(int(n_likes), 0)
+        weighted.append([(tid, count * weight) for tid, count in doc])
+    return weighted
+
+
 def build_tfidf_corpus(
     corpus: list[list[tuple[int, int]]],
 ) -> tuple[models.TfidfModel, list[list[tuple[int, int]]]]:
@@ -161,6 +184,10 @@ def run_lda_pipeline(
     corpus: list[list[tuple[int, int]]],
     documents: list[str],
     settings: LDASettings | dict[str, Any] | None = None,
+    *,
+    reweight_by_likes: bool = False,
+    likes_alpha: float = 0.1,
+    document_likes: list[int] | None = None,
 ) -> dict[str, Any]:
     """
     End-to-end LDA workflow from preprocessed Gensim objects.
@@ -184,6 +211,17 @@ def run_lda_pipeline(
     cfg = settings if settings is not None else LDASettings()
     if isinstance(cfg, dict):
         cfg = LDASettings(**{k: v for k, v in cfg.items() if k in LDASettings.__dataclass_fields__})
+
+    if reweight_by_likes:
+        if document_likes is None:
+            raise ValueError(
+                "document_likes is required when reweight_by_likes=True"
+            )
+        corpus = reweight_corpus_by_likes(
+            corpus,
+            document_likes,
+            alpha=likes_alpha,
+        )
 
     tfidf, corpus_tfidf = build_tfidf_corpus(corpus)
     lda_model = train_lda_model(corpus_tfidf, dictionary, cfg)

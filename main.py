@@ -19,7 +19,7 @@ from preprocess_corpus import DEFAULT_CONFIG, preprocess_corpus
 PROJECT_ROOT = Path(__file__).resolve().parent
 
 DATA_DIR = "/Users/xiangningxu/Documents/vibe_coding/Scraping"
-FILE_PATTERN = "comments_sampled_*.csv"
+FILE_PATTERN = "comments_sampled_生育意愿.csv"
 TEXT_COLUMN = "comment_text"
 VOTE_VALUES = None  # e.g. [1, 2]; None keeps all rows
 
@@ -30,7 +30,7 @@ FILTERED_WORDS_FILE = PROJECT_ROOT / "filtered_words.txt"
 LOW_FREQUENCY_FILE = PROJECT_ROOT / "low_frequency.txt"
 REPLACEMENT_RULES_FILE = PROJECT_ROOT / "replacement_rules2.txt"
 MEGATOKEN_FILE = PROJECT_ROOT / "megatoken.txt"
-
+e
 # Preprocessing filters
 DEDUPLICATE_COMMENTS = True
 MAX_EMOJIS_PER_COMMENT = 10
@@ -38,12 +38,22 @@ MAX_LINKS_PER_COMMENT = 1  # drop comments with more than one webpage link
 MIN_CHUNK_LEN = 3
 MIN_CONSECUTIVE_DUP_RUN = 3
 MIN_TOKEN_FREQ = 2
+FILTER_SINGLE_CHAR_TOKENS = False
+SINGLE_CHAR_TOKENS_FILE = PROJECT_ROOT / "single_char_tokens.txt"
+SINGLE_CHAR_TOP_PCT = 20
+SINGLE_CHAR_MID_LOW_PCT = 20
+SINGLE_CHAR_MID_HIGH_PCT = 90
 LDA_EXCLUDE_TOKENS = {
     "孩子", "小孩子", "生孩子", "没有", "不想", "不生", "问题", "时候",
 }
-MIN_DOC_FREQ = 80
-MAX_DOC_FREQ = 0.7
+MIN_DOC_FREQ = 10
+MAX_DOC_FREQ = 0.8
 KEEP_N = None  # int: keep top-N tokens by frequency; None: use all tokens after preprocessing
+LIKES_COLUMN = "like_count"  # Scraping CSVs; use "numlikes" for comments_oid323836485.csv
+
+# Corpus reweighting before LDA (scale each doc by 1 + LIKES_ALPHA * num_likes)
+REWEIGHT_BY_LIKES = True
+LIKES_ALPHA = 0.1
 
 # LDA hyper-parameters
 NUM_TOPICS = 25
@@ -68,6 +78,7 @@ def build_preprocess_config() -> dict:
         "data_dir": DATA_DIR,
         "file_pattern": FILE_PATTERN,
         "text_column": TEXT_COLUMN,
+        "likes_column": LIKES_COLUMN,
         "vote_values": VOTE_VALUES,
         "custom_words_file": str(CUSTOM_WORDS_FILE),
         "stop_words_file": str(STOP_WORDS_FILE),
@@ -81,6 +92,11 @@ def build_preprocess_config() -> dict:
         "min_chunk_len": MIN_CHUNK_LEN,
         "min_consecutive_dup_run": MIN_CONSECUTIVE_DUP_RUN,
         "min_token_freq": MIN_TOKEN_FREQ,
+        "filter_single_char_tokens": FILTER_SINGLE_CHAR_TOKENS,
+        "single_char_tokens_file": str(SINGLE_CHAR_TOKENS_FILE),
+        "single_char_top_pct": SINGLE_CHAR_TOP_PCT,
+        "single_char_mid_low_pct": SINGLE_CHAR_MID_LOW_PCT,
+        "single_char_mid_high_pct": SINGLE_CHAR_MID_HIGH_PCT,
         "lda_exclude_tokens": LDA_EXCLUDE_TOKENS,
         "min_doc_freq": MIN_DOC_FREQ,
         "max_doc_freq": MAX_DOC_FREQ,
@@ -112,6 +128,15 @@ def main() -> dict:
     for key, value in stats.items():
         print(f"  {key}: {value}")
 
+    if FILTER_SINGLE_CHAR_TOKENS:
+        print(
+            f"\n  Single-char filter: ON "
+            f"(top {SINGLE_CHAR_TOP_PCT}% → whitelist; "
+            f"{SINGLE_CHAR_MID_LOW_PCT}–{SINGLE_CHAR_MID_HIGH_PCT}% → adjectives)"
+        )
+    else:
+        print("\n  Single-char filter: OFF")
+
     dictionary = preprocessed["dictionary"]
     if KEEP_N is None:
         print(
@@ -132,11 +157,28 @@ def main() -> dict:
     print("Step 2: Train LDA")
     print("=" * 80)
 
+    document_likes = preprocessed.get("document_likes")
+    if REWEIGHT_BY_LIKES:
+        if document_likes is None:
+            raise ValueError(
+                f"REWEIGHT_BY_LIKES is enabled but likes column "
+                f"{LIKES_COLUMN!r} was not found or loaded"
+            )
+        print(
+            f"  Like reweighting: ON (alpha={LIKES_ALPHA}, "
+            f"weight = 1 + {LIKES_ALPHA} * num_likes)"
+        )
+    else:
+        print("  Like reweighting: OFF")
+
     lda_result = run_lda_pipeline(
         dictionary=dictionary,
         corpus=corpus,
         documents=documents,
         settings=build_lda_settings(),
+        reweight_by_likes=REWEIGHT_BY_LIKES,
+        likes_alpha=LIKES_ALPHA,
+        document_likes=document_likes,
     )
 
     lda_model = lda_result["lda_model"]
