@@ -46,6 +46,11 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "deduplicate_comments": True,
     "max_emojis_per_comment": 10,
     "max_links_per_comment": 1,  # drop comments with more than this many webpage links
+    "filter_product_sales_comments": True,
+    "max_product_term_mentions": 2,  # drop if product/sales term count exceeds this
+    "product_sales_terms_file": "product_sales_terms.txt",
+    "filter_ai_comments": True,
+    "ai_comment_terms_file": "ai_comment_terms.txt",
 
     # --- Text cleaning ---
     "min_chunk_len": 3,
@@ -124,6 +129,80 @@ def _count_webpage_links(text: str) -> int:
     return len(_WEBPAGE_LINK_RE.findall(text))
 
 
+def _load_terms(path: str | Path, fallback: set[str]) -> set[str]:
+    """Load filter terms from file, or use fallback if file is missing."""
+    p = Path(path)
+    if p.exists():
+        return set(_load_word_list(p))
+    return fallback
+
+
+_DEFAULT_PRODUCT_SALES_TERMS = {
+    "小米", "红米", "荣耀", "华为", "OPPO", "vivo", "苹果", "iPhone", "三星",
+    "一加", "淘宝", "天猫", "京东", "拼多多", "优惠券", "带货", "直播带货",
+    "下单", "秒杀", "旗舰店", "代购", "包邮", "折扣", "促销", "种草", "安利",
+    "同款", "领券", "双十一", "618",
+}
+
+_DEFAULT_AI_COMMENT_TERMS = {
+    "AI助手", "ai助手", "AI小结", "ai小结", "AI总结", "ai总结", "AI生成", "ai生成",
+    "人工智能", "ChatGPT", "chatgpt", "GPT", "智能总结", "自动总结", "由AI",
+    "哔哩哔哩AI", "B站AI", "AI评论", "ai评论", "大模型", "语言模型",
+}
+
+_AI_COMMENT_PATTERNS = [
+    re.compile(r"\[AI[^\]]*\]", re.IGNORECASE),
+    re.compile(r"AI\s*助手", re.IGNORECASE),
+    re.compile(r"ai\s*小结", re.IGNORECASE),
+]
+
+
+def _count_term_mentions(text: str, terms: set[str]) -> int:
+    """Count total non-overlapping substring hits for sales/product terms."""
+    lower = text.lower()
+    total = 0
+    for term in sorted(terms, key=len, reverse=True):
+        if term.isascii():
+            total += lower.count(term.lower())
+        else:
+            total += text.count(term)
+    return total
+
+
+def _is_ai_generated_comment(text: str, terms: set[str]) -> bool:
+    """True if comment matches AI-summary keywords or patterns."""
+    lower = text.lower()
+    for term in terms:
+        if term.isascii():
+            if term.lower() in lower:
+                return True
+        elif term in text:
+            return True
+    return any(pat.search(text) for pat in _AI_COMMENT_PATTERNS)
+
+
+def _filter_comments_parallel(
+    comments: list[str],
+    likes: list[int] | None,
+    *,
+    drop_if,
+) -> tuple[list[str], list[int] | None, int]:
+    """Filter comments (and optional likes) with a drop predicate; return drop count."""
+    track_likes = likes is not None
+    kept_comments: list[str] = []
+    kept_likes: list[int] = []
+    dropped = 0
+    for i, comment in enumerate(comments):
+        if drop_if(comment):
+            dropped += 1
+        else:
+            kept_comments.append(comment)
+            if track_likes:
+                kept_likes.append(likes[i])
+    out_likes = kept_likes if track_likes else likes
+    return kept_comments, out_likes, dropped
+
+
 def prepare_comments(
     comments: list[str],
     config: dict[str, Any],
@@ -131,15 +210,17 @@ def prepare_comments(
     likes: list[int] | None = None,
 ) -> tuple[list[str], dict[str, int], list[int] | None]:
     """
-    Drop emoji-heavy, multi-link, and duplicate comments before tokenization.
+    Drop spammy, off-topic, and duplicate comments before tokenization.
 
-    Order: emoji filter, link filter, then deduplication (keeps first occurrence).
+    Order: emoji → links → product-sales → AI-summary → deduplication.
     If ``likes`` is provided, it is filtered in parallel with ``comments``.
     """
     stats = {
         "n_loaded": len(comments),
         "n_dropped_emojis": 0,
         "n_dropped_multi_link": 0,
+        "n_dropped_product_sales": 0,
+        "n_dropped_ai_generated": 0,
         "n_dropped_duplicates": 0,
         "n_kept": 0,
     }
@@ -166,18 +247,38 @@ def prepare_comments(
 
     max_links = config.get("max_links_per_comment")
     if max_links is not None:
-        kept_comments = []
-        kept_likes = []
-        for i, comment in enumerate(comments):
-            if _count_webpage_links(comment) > max_links:
-                stats["n_dropped_multi_link"] += 1
-            else:
-                kept_comments.append(comment)
-                if track_likes:
-                    kept_likes.append(likes[i])
-        comments = kept_comments
-        if track_likes:
-            likes = kept_likes
+        comments, likes, stats["n_dropped_multi_link"] = _filter_comments_parallel(
+            comments,
+            likes,
+            drop_if=lambda c: _count_webpage_links(c) > max_links,
+        )
+
+    if config.get("filter_product_sales_comments", True):
+        product_terms = _load_terms(
+            config.get("product_sales_terms_file", "product_sales_terms.txt"),
+            _DEFAULT_PRODUCT_SALES_TERMS,
+        )
+        max_mentions = config.get("max_product_term_mentions", 2)
+
+        def _is_product_spam(comment: str) -> bool:
+            return _count_term_mentions(comment, product_terms) > max_mentions
+
+        comments, likes, stats["n_dropped_product_sales"] = _filter_comments_parallel(
+            comments,
+            likes,
+            drop_if=_is_product_spam,
+        )
+
+    if config.get("filter_ai_comments", True):
+        ai_terms = _load_terms(
+            config.get("ai_comment_terms_file", "ai_comment_terms.txt"),
+            _DEFAULT_AI_COMMENT_TERMS,
+        )
+        comments, likes, stats["n_dropped_ai_generated"] = _filter_comments_parallel(
+            comments,
+            likes,
+            drop_if=lambda c: _is_ai_generated_comment(c, ai_terms),
+        )
 
     if config.get("deduplicate_comments", True):
         seen: set[str] = set()

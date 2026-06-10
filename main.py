@@ -30,11 +30,16 @@ FILTERED_WORDS_FILE = PROJECT_ROOT / "filtered_words.txt"
 LOW_FREQUENCY_FILE = PROJECT_ROOT / "low_frequency.txt"
 REPLACEMENT_RULES_FILE = PROJECT_ROOT / "replacement_rules2.txt"
 MEGATOKEN_FILE = PROJECT_ROOT / "megatoken.txt"
-e
+PRODUCT_SALES_TERMS_FILE = PROJECT_ROOT / "product_sales_terms.txt"
+AI_COMMENT_TERMS_FILE = PROJECT_ROOT / "ai_comment_terms.txt"
+
 # Preprocessing filters
 DEDUPLICATE_COMMENTS = True
 MAX_EMOJIS_PER_COMMENT = 10
 MAX_LINKS_PER_COMMENT = 1  # drop comments with more than one webpage link
+FILTER_PRODUCT_SALES_COMMENTS = True
+MAX_PRODUCT_TERM_MENTIONS = 2  # drop if product/sales term count exceeds this (>2 → 3+ hits)
+FILTER_AI_COMMENTS = True
 MIN_CHUNK_LEN = 3
 MIN_CONSECUTIVE_DUP_RUN = 3
 MIN_TOKEN_FREQ = 2
@@ -51,9 +56,10 @@ MAX_DOC_FREQ = 0.8
 KEEP_N = None  # int: keep top-N tokens by frequency; None: use all tokens after preprocessing
 LIKES_COLUMN = "like_count"  # Scraping CSVs; use "numlikes" for comments_oid323836485.csv
 
-# Corpus reweighting before LDA (scale each doc by 1 + LIKES_ALPHA * num_likes)
+# Corpus reweighting before LDA
 REWEIGHT_BY_LIKES = True
-LIKES_ALPHA = 0.1
+LIKES_USE_LOG = False  # False: weight = 1 + LIKES_ALPHA * num_likes; True: weight = 1 + log(num_likes)
+LIKES_ALPHA = 0.1      # used only when LIKES_USE_LOG is False
 
 # LDA hyper-parameters
 NUM_TOPICS = 25
@@ -89,6 +95,11 @@ def build_preprocess_config() -> dict:
         "deduplicate_comments": DEDUPLICATE_COMMENTS,
         "max_emojis_per_comment": MAX_EMOJIS_PER_COMMENT,
         "max_links_per_comment": MAX_LINKS_PER_COMMENT,
+        "filter_product_sales_comments": FILTER_PRODUCT_SALES_COMMENTS,
+        "max_product_term_mentions": MAX_PRODUCT_TERM_MENTIONS,
+        "product_sales_terms_file": str(PRODUCT_SALES_TERMS_FILE),
+        "filter_ai_comments": FILTER_AI_COMMENTS,
+        "ai_comment_terms_file": str(AI_COMMENT_TERMS_FILE),
         "min_chunk_len": MIN_CHUNK_LEN,
         "min_consecutive_dup_run": MIN_CONSECUTIVE_DUP_RUN,
         "min_token_freq": MIN_TOKEN_FREQ,
@@ -128,6 +139,18 @@ def main() -> dict:
     for key, value in stats.items():
         print(f"  {key}: {value}")
 
+    print(
+        f"\n  Product-sales filter: {'ON' if FILTER_PRODUCT_SALES_COMMENTS else 'OFF'}"
+        + (
+            f" (drop if >{MAX_PRODUCT_TERM_MENTIONS} term hits)"
+            if FILTER_PRODUCT_SALES_COMMENTS
+            else ""
+        )
+    )
+    print(
+        f"  AI-comment filter: {'ON' if FILTER_AI_COMMENTS else 'OFF'}"
+    )
+
     if FILTER_SINGLE_CHAR_TOKENS:
         print(
             f"\n  Single-char filter: ON "
@@ -164,10 +187,13 @@ def main() -> dict:
                 f"REWEIGHT_BY_LIKES is enabled but likes column "
                 f"{LIKES_COLUMN!r} was not found or loaded"
             )
-        print(
-            f"  Like reweighting: ON (alpha={LIKES_ALPHA}, "
-            f"weight = 1 + {LIKES_ALPHA} * num_likes)"
-        )
+        if LIKES_USE_LOG:
+            print("  Like reweighting: ON (log mode, weight = 1 + log(num_likes))")
+        else:
+            print(
+                f"  Like reweighting: ON (scale mode, alpha={LIKES_ALPHA}, "
+                f"weight = 1 + {LIKES_ALPHA} * num_likes)"
+            )
     else:
         print("  Like reweighting: OFF")
 
@@ -178,6 +204,7 @@ def main() -> dict:
         settings=build_lda_settings(),
         reweight_by_likes=REWEIGHT_BY_LIKES,
         likes_alpha=LIKES_ALPHA,
+        likes_use_log=LIKES_USE_LOG,
         document_likes=document_likes,
     )
 

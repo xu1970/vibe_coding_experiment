@@ -7,8 +7,9 @@ and model settings; they do not perform text preprocessing.
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, Literal
 
 import pandas as pd
 from gensim import corpora, models
@@ -30,14 +31,32 @@ class LDASettings:
     topn_docs_per_topic: int = 7
 
 
+def _like_weight(
+    n_likes: int,
+    *,
+    mode: Literal["scale", "log"] = "scale",
+    alpha: float = 0.1,
+) -> float:
+    """Document weight from like count: linear scale or logarithmic."""
+    n = max(int(n_likes), 0)
+    if mode == "log":
+        # 1 + log(likes); log(0) undefined → use log(1) so zero-likes docs keep weight 1
+        return 1.0 + math.log(max(n, 1))
+    return 1.0 + alpha * n
+
+
 def reweight_corpus_by_likes(
     corpus: list[list[tuple[int, int]]],
     likes: list[int],
     *,
     alpha: float = 0.1,
+    mode: Literal["scale", "log"] = "scale",
 ) -> list[list[tuple[int, float]]]:
     """
-    Scale each document's token weights by 1 + alpha * num_likes.
+    Scale each document's token weights by a like-based factor.
+
+    - ``scale``: weight = 1 + alpha * num_likes
+    - ``log``: weight = 1 + log(num_likes)  (0 likes → weight 1)
 
     Applied to the BoW matrix before TF-IDF / LDA training.
     """
@@ -48,7 +67,7 @@ def reweight_corpus_by_likes(
 
     weighted: list[list[tuple[int, float]]] = []
     for doc, n_likes in zip(corpus, likes):
-        weight = 1.0 + alpha * max(int(n_likes), 0)
+        weight = _like_weight(n_likes, mode=mode, alpha=alpha)
         weighted.append([(tid, count * weight) for tid, count in doc])
     return weighted
 
@@ -187,6 +206,7 @@ def run_lda_pipeline(
     *,
     reweight_by_likes: bool = False,
     likes_alpha: float = 0.1,
+    likes_use_log: bool = False,
     document_likes: list[int] | None = None,
 ) -> dict[str, Any]:
     """
@@ -221,6 +241,7 @@ def run_lda_pipeline(
             corpus,
             document_likes,
             alpha=likes_alpha,
+            mode="log" if likes_use_log else "scale",
         )
 
     tfidf, corpus_tfidf = build_tfidf_corpus(corpus)
