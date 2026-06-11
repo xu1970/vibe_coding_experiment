@@ -51,6 +51,15 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "product_sales_terms_file": "product_sales_terms.txt",
     "filter_ai_comments": True,
     "ai_comment_terms_file": "ai_comment_terms.txt",
+    "filter_bracket_spam_comments": True,
+    "max_bracket_pairs_per_comment": 3,  # drop if <> or 《》 pair count exceeds this
+    "filter_blocked_comment_terms": True,
+    "max_blocked_term_mentions": 3,  # drop if any listed term appears more than this
+    "blocked_comment_terms_file": "blocked_comment_terms.txt",
+    "filter_short_engagement_comments": True,
+    "short_engagement_min_tokens": 10,  # drop only when jieba token count is below this
+    "short_engagement_max_term_mentions": 1,  # drop if listed-term hits exceed this (>1 → 2+)
+    "engagement_spam_terms_file": "engagement_spam_terms.txt",
 
     # --- Text cleaning ---
     "min_chunk_len": 3,
@@ -141,7 +150,7 @@ _DEFAULT_PRODUCT_SALES_TERMS = {
     "小米", "红米", "荣耀", "华为", "OPPO", "vivo", "苹果", "iPhone", "三星",
     "一加", "淘宝", "天猫", "京东", "拼多多", "优惠券", "带货", "直播带货",
     "下单", "秒杀", "旗舰店", "代购", "包邮", "折扣", "促销", "种草", "安利",
-    "同款", "领券", "双十一", "618",
+    "同款", "领券", "双十一", "618","电信","流量","手机号","双卡",
 }
 
 _DEFAULT_AI_COMMENT_TERMS = {
@@ -157,6 +166,18 @@ _AI_COMMENT_PATTERNS = [
 ]
 
 
+_ANGLE_BRACKET_PAIR_RE = re.compile(r"<[^<>]*>")
+_BOOK_TITLE_PAIR_RE = re.compile(r"《[^》]*》")
+
+
+def _count_bracket_marker_pairs(text: str) -> int:
+    """Count well-formed <> and 《》 pairs in comment text."""
+    return (
+        len(_ANGLE_BRACKET_PAIR_RE.findall(text))
+        + len(_BOOK_TITLE_PAIR_RE.findall(text))
+    )
+
+
 def _count_term_mentions(text: str, terms: set[str]) -> int:
     """Count total non-overlapping substring hits for sales/product terms."""
     lower = text.lower()
@@ -167,6 +188,42 @@ def _count_term_mentions(text: str, terms: set[str]) -> int:
         else:
             total += text.count(term)
     return total
+
+
+def _max_single_term_mentions(text: str, terms: set[str]) -> int:
+    """Maximum occurrence count of any one term in the list."""
+    lower = text.lower()
+    max_hits = 0
+    for term in terms:
+        if term.isascii():
+            hits = lower.count(term.lower())
+        else:
+            hits = text.count(term)
+        max_hits = max(max_hits, hits)
+    return max_hits
+
+
+_DEFAULT_BLOCKED_COMMENT_TERMS = {"劳务派遣","秦皇岛高技","胃镜"}
+
+_DEFAULT_ENGAGEMENT_SPAM_TERMS = {"点赞", "赞同", "关注",'美拍'}
+
+
+def _jieba_raw_token_count(text: str) -> int:
+    """Token count on raw comment text (pre-pipeline tokenization)."""
+    return len(list(pseg.cut(text)))
+
+
+def _is_short_engagement_spam_comment(
+    text: str,
+    terms: set[str],
+    *,
+    min_tokens: int,
+    max_term_mentions: int,
+) -> bool:
+    """Drop short comments with multiple engagement-term hits (点赞/赞同/关注)."""
+    if _jieba_raw_token_count(text) >= min_tokens:
+        return False
+    return _count_term_mentions(text, terms) > max_term_mentions
 
 
 def _is_ai_generated_comment(text: str, terms: set[str]) -> bool:
@@ -212,15 +269,18 @@ def prepare_comments(
     """
     Drop spammy, off-topic, and duplicate comments before tokenization.
 
-    Order: emoji → links → product-sales → AI-summary → deduplication.
+    Order: emoji → links → brackets → blocked terms → product-sales → AI → short engagement → dedup.
     If ``likes`` is provided, it is filtered in parallel with ``comments``.
     """
     stats = {
         "n_loaded": len(comments),
         "n_dropped_emojis": 0,
         "n_dropped_multi_link": 0,
+        "n_dropped_bracket_spam": 0,
+        "n_dropped_blocked_terms": 0,
         "n_dropped_product_sales": 0,
         "n_dropped_ai_generated": 0,
+        "n_dropped_short_engagement": 0,
         "n_dropped_duplicates": 0,
         "n_kept": 0,
     }
@@ -253,6 +313,30 @@ def prepare_comments(
             drop_if=lambda c: _count_webpage_links(c) > max_links,
         )
 
+    if config.get("filter_bracket_spam_comments", True):
+        max_pairs = config.get("max_bracket_pairs_per_comment", 3)
+        comments, likes, stats["n_dropped_bracket_spam"] = _filter_comments_parallel(
+            comments,
+            likes,
+            drop_if=lambda c: _count_bracket_marker_pairs(c) > max_pairs,
+        )
+
+    if config.get("filter_blocked_comment_terms", True):
+        blocked_terms = _load_terms(
+            config.get("blocked_comment_terms_file", "blocked_comment_terms.txt"),
+            _DEFAULT_BLOCKED_COMMENT_TERMS,
+        )
+        max_blocked = config.get("max_blocked_term_mentions", 3)
+
+        def _has_excessive_blocked_term(comment: str) -> bool:
+            return _max_single_term_mentions(comment, blocked_terms) > max_blocked
+
+        comments, likes, stats["n_dropped_blocked_terms"] = _filter_comments_parallel(
+            comments,
+            likes,
+            drop_if=_has_excessive_blocked_term,
+        )
+
     if config.get("filter_product_sales_comments", True):
         product_terms = _load_terms(
             config.get("product_sales_terms_file", "product_sales_terms.txt"),
@@ -278,6 +362,28 @@ def prepare_comments(
             comments,
             likes,
             drop_if=lambda c: _is_ai_generated_comment(c, ai_terms),
+        )
+
+    if config.get("filter_short_engagement_comments", True):
+        engagement_terms = _load_terms(
+            config.get("engagement_spam_terms_file", "engagement_spam_terms.txt"),
+            _DEFAULT_ENGAGEMENT_SPAM_TERMS,
+        )
+        min_tokens = config.get("short_engagement_min_tokens", 10)
+        max_mentions = config.get("short_engagement_max_term_mentions", 1)
+
+        def _is_short_engagement_spam(comment: str) -> bool:
+            return _is_short_engagement_spam_comment(
+                comment,
+                engagement_terms,
+                min_tokens=min_tokens,
+                max_term_mentions=max_mentions,
+            )
+
+        comments, likes, stats["n_dropped_short_engagement"] = _filter_comments_parallel(
+            comments,
+            likes,
+            drop_if=_is_short_engagement_spam,
         )
 
     if config.get("deduplicate_comments", True):
@@ -347,7 +453,7 @@ def _refine_tokens(
         "崽子", "儿子", "一个人", "宠物", "猫", "狗",
     }
     verb_words = {"给", "有", "生", "没", "抱", "带", "养", "爱", "不要", "要"}
-    keep_flags = {"n", "v", "a", "vn", "an", "nr", "nt", "nz", "t"}
+    keep_flags = {"n", "v", "a", "vn", "an", 'nz', 'nr', 'nt','t'}
 
     for token_text in chunk_texts:
         if not token_text.strip():

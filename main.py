@@ -19,7 +19,7 @@ from preprocess_corpus import DEFAULT_CONFIG, preprocess_corpus
 PROJECT_ROOT = Path(__file__).resolve().parent
 
 DATA_DIR = "/Users/xiangningxu/Documents/vibe_coding/Scraping"
-FILE_PATTERN = "comments_sampled_生育意愿.csv"
+FILE_PATTERN = "comments_sampled_生育*.csv"
 TEXT_COLUMN = "comment_text"
 VOTE_VALUES = None  # e.g. [1, 2]; None keeps all rows
 
@@ -32,22 +32,31 @@ REPLACEMENT_RULES_FILE = PROJECT_ROOT / "replacement_rules2.txt"
 MEGATOKEN_FILE = PROJECT_ROOT / "megatoken.txt"
 PRODUCT_SALES_TERMS_FILE = PROJECT_ROOT / "product_sales_terms.txt"
 AI_COMMENT_TERMS_FILE = PROJECT_ROOT / "ai_comment_terms.txt"
+BLOCKED_COMMENT_TERMS_FILE = PROJECT_ROOT / "blocked_comment_terms.txt"
+ENGAGEMENT_SPAM_TERMS_FILE = PROJECT_ROOT / "engagement_spam_terms.txt"
 
 # Preprocessing filters
 DEDUPLICATE_COMMENTS = True
 MAX_EMOJIS_PER_COMMENT = 10
 MAX_LINKS_PER_COMMENT = 1  # drop comments with more than one webpage link
+FILTER_BRACKET_SPAM_COMMENTS = True
+MAX_BRACKET_PAIRS_PER_COMMENT = 3  # drop if <> or 《》 pair count exceeds this (>3 → 4+ pairs)
+FILTER_BLOCKED_COMMENT_TERMS = True
+MAX_BLOCKED_TERM_MENTIONS = 1  # drop if any listed term appears more than this (>3 → 4+ hits)
 FILTER_PRODUCT_SALES_COMMENTS = True
 MAX_PRODUCT_TERM_MENTIONS = 2  # drop if product/sales term count exceeds this (>2 → 3+ hits)
 FILTER_AI_COMMENTS = True
+FILTER_SHORT_ENGAGEMENT_COMMENTS = True
+SHORT_ENGAGEMENT_MIN_TOKENS = 10  # drop only when comment has fewer than this many jieba tokens
+SHORT_ENGAGEMENT_MAX_TERM_MENTIONS = 1  # drop if 点赞/赞同/关注 hits exceed this (>1 → 2+)
 MIN_CHUNK_LEN = 3
 MIN_CONSECUTIVE_DUP_RUN = 3
 MIN_TOKEN_FREQ = 2
-FILTER_SINGLE_CHAR_TOKENS = False
+FILTER_SINGLE_CHAR_TOKENS = True
 SINGLE_CHAR_TOKENS_FILE = PROJECT_ROOT / "single_char_tokens.txt"
 SINGLE_CHAR_TOP_PCT = 20
 SINGLE_CHAR_MID_LOW_PCT = 20
-SINGLE_CHAR_MID_HIGH_PCT = 90
+SINGLE_CHAR_MID_HIGH_PCT = 80
 LDA_EXCLUDE_TOKENS = {
     "孩子", "小孩子", "生孩子", "没有", "不想", "不生", "问题", "时候",
 }
@@ -58,11 +67,11 @@ LIKES_COLUMN = "like_count"  # Scraping CSVs; use "numlikes" for comments_oid323
 
 # Corpus reweighting before LDA
 REWEIGHT_BY_LIKES = True
-LIKES_USE_LOG = False  # False: weight = 1 + LIKES_ALPHA * num_likes; True: weight = 1 + log(num_likes)
+LIKES_USE_LOG = True  # False: weight = 1 + LIKES_ALPHA * num_likes; True: weight = 1 + log(num_likes)
 LIKES_ALPHA = 0.1      # used only when LIKES_USE_LOG is False
 
 # LDA hyper-parameters
-NUM_TOPICS = 25
+NUM_TOPICS = 20
 PASSES = 25
 RANDOM_STATE = 42
 TOPN_TOPICS_PRINT = 10
@@ -72,7 +81,7 @@ TOPN_DOCS_PER_TOPIC = 7
 # CSV output settings
 OUTPUT_DIR = PROJECT_ROOT / "outputs"
 NUM_TOPIC_TOKENS = 15
-NUM_TOP_COMMENTS = 5
+NUM_TOP_COMMENTS = 10
 TOPIC_TOKENS_FILENAME = OUTPUT_DIR / "topic_tokens.csv"
 TOP_COMMENTS_FILENAME = OUTPUT_DIR / "top_comments.csv"
 
@@ -95,11 +104,20 @@ def build_preprocess_config() -> dict:
         "deduplicate_comments": DEDUPLICATE_COMMENTS,
         "max_emojis_per_comment": MAX_EMOJIS_PER_COMMENT,
         "max_links_per_comment": MAX_LINKS_PER_COMMENT,
+        "filter_bracket_spam_comments": FILTER_BRACKET_SPAM_COMMENTS,
+        "max_bracket_pairs_per_comment": MAX_BRACKET_PAIRS_PER_COMMENT,
+        "filter_blocked_comment_terms": FILTER_BLOCKED_COMMENT_TERMS,
+        "max_blocked_term_mentions": MAX_BLOCKED_TERM_MENTIONS,
+        "blocked_comment_terms_file": str(BLOCKED_COMMENT_TERMS_FILE),
         "filter_product_sales_comments": FILTER_PRODUCT_SALES_COMMENTS,
         "max_product_term_mentions": MAX_PRODUCT_TERM_MENTIONS,
         "product_sales_terms_file": str(PRODUCT_SALES_TERMS_FILE),
         "filter_ai_comments": FILTER_AI_COMMENTS,
         "ai_comment_terms_file": str(AI_COMMENT_TERMS_FILE),
+        "filter_short_engagement_comments": FILTER_SHORT_ENGAGEMENT_COMMENTS,
+        "short_engagement_min_tokens": SHORT_ENGAGEMENT_MIN_TOKENS,
+        "short_engagement_max_term_mentions": SHORT_ENGAGEMENT_MAX_TERM_MENTIONS,
+        "engagement_spam_terms_file": str(ENGAGEMENT_SPAM_TERMS_FILE),
         "min_chunk_len": MIN_CHUNK_LEN,
         "min_consecutive_dup_run": MIN_CONSECUTIVE_DUP_RUN,
         "min_token_freq": MIN_TOKEN_FREQ,
@@ -137,10 +155,28 @@ def main() -> dict:
     preprocessed = preprocess_corpus(build_preprocess_config())
     stats = preprocessed["stats"]
     for key, value in stats.items():
+        if key.startswith("n_single_char_") or key == "single_char_report":
+            continue
         print(f"  {key}: {value}")
 
     print(
-        f"\n  Product-sales filter: {'ON' if FILTER_PRODUCT_SALES_COMMENTS else 'OFF'}"
+        f"\n  Bracket-spam filter: {'ON' if FILTER_BRACKET_SPAM_COMMENTS else 'OFF'}"
+        + (
+            f" (drop if >{MAX_BRACKET_PAIRS_PER_COMMENT} <> or 《》 pairs)"
+            if FILTER_BRACKET_SPAM_COMMENTS
+            else ""
+        )
+    )
+    print(
+        f"  Blocked-term filter: {'ON' if FILTER_BLOCKED_COMMENT_TERMS else 'OFF'}"
+        + (
+            f" (drop if any listed term appears >{MAX_BLOCKED_TERM_MENTIONS} times)"
+            if FILTER_BLOCKED_COMMENT_TERMS
+            else ""
+        )
+    )
+    print(
+        f"  Product-sales filter: {'ON' if FILTER_PRODUCT_SALES_COMMENTS else 'OFF'}"
         + (
             f" (drop if >{MAX_PRODUCT_TERM_MENTIONS} term hits)"
             if FILTER_PRODUCT_SALES_COMMENTS
@@ -150,15 +186,15 @@ def main() -> dict:
     print(
         f"  AI-comment filter: {'ON' if FILTER_AI_COMMENTS else 'OFF'}"
     )
-
-    if FILTER_SINGLE_CHAR_TOKENS:
-        print(
-            f"\n  Single-char filter: ON "
-            f"(top {SINGLE_CHAR_TOP_PCT}% → whitelist; "
-            f"{SINGLE_CHAR_MID_LOW_PCT}–{SINGLE_CHAR_MID_HIGH_PCT}% → adjectives)"
+    print(
+        f"  Short-engagement filter: {'ON' if FILTER_SHORT_ENGAGEMENT_COMMENTS else 'OFF'}"
+        + (
+            f" (drop if <{SHORT_ENGAGEMENT_MIN_TOKENS} tokens and"
+            f" >{SHORT_ENGAGEMENT_MAX_TERM_MENTIONS} 点赞/赞同/关注 hits)"
+            if FILTER_SHORT_ENGAGEMENT_COMMENTS
+            else ""
         )
-    else:
-        print("\n  Single-char filter: OFF")
+    )
 
     dictionary = preprocessed["dictionary"]
     if KEEP_N is None:
