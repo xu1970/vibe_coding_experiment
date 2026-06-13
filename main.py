@@ -23,17 +23,20 @@ FILE_PATTERN = "comments_sampled_生育*.csv"
 TEXT_COLUMN = "comment_text"
 VOTE_VALUES = None  # e.g. [1, 2]; None keeps all rows
 
-# Resource files (relative to project root)
-CUSTOM_WORDS_FILE = PROJECT_ROOT / "custom_words.txt"
-STOP_WORDS_FILE = PROJECT_ROOT / "stop_words.txt"
-FILTERED_WORDS_FILE = PROJECT_ROOT / "filtered_words.txt"
-LOW_FREQUENCY_FILE = PROJECT_ROOT / "low_frequency.txt"
-REPLACEMENT_RULES_FILE = PROJECT_ROOT / "replacement_rules2.txt"
-MEGATOKEN_FILE = PROJECT_ROOT / "megatoken.txt"
-PRODUCT_SALES_TERMS_FILE = PROJECT_ROOT / "product_sales_terms.txt"
-AI_COMMENT_TERMS_FILE = PROJECT_ROOT / "ai_comment_terms.txt"
-BLOCKED_COMMENT_TERMS_FILE = PROJECT_ROOT / "blocked_comment_terms.txt"
-ENGAGEMENT_SPAM_TERMS_FILE = PROJECT_ROOT / "engagement_spam_terms.txt"
+# Resource files (under preprocess_lists/)
+PREPROCESS_LISTS_DIR = PROJECT_ROOT / "preprocess_lists"
+CUSTOM_WORDS_FILE = PREPROCESS_LISTS_DIR / "custom_words.txt"
+STOP_WORDS_FILE = PREPROCESS_LISTS_DIR / "stop_words.txt"
+FILTERED_WORDS_FILE = PREPROCESS_LISTS_DIR / "filtered_words.txt"
+LOW_FREQUENCY_FILE = PREPROCESS_LISTS_DIR / "low_frequency.txt"
+REPLACEMENT_RULES_FILE = PREPROCESS_LISTS_DIR / "replacement_rules2.txt"
+MEGATOKEN_FILE = PREPROCESS_LISTS_DIR / "megatoken.txt"
+PRODUCT_SALES_TERMS_FILE = PREPROCESS_LISTS_DIR / "product_sales_terms.txt"
+AI_COMMENT_TERMS_FILE = PREPROCESS_LISTS_DIR / "ai_comment_terms.txt"
+BLOCKED_COMMENT_TERMS_FILE = PREPROCESS_LISTS_DIR / "blocked_comment_terms.txt"
+ENGAGEMENT_SPAM_TERMS_FILE = PREPROCESS_LISTS_DIR / "engagement_spam_terms.txt"
+REPETITION_SPAM_TERMS_FILE = PREPROCESS_LISTS_DIR / "repetition_spam_terms.txt"
+META_DISCUSSION_TERMS_FILE = PREPROCESS_LISTS_DIR / "meta_discussion_terms.txt"
 
 # Preprocessing filters
 DEDUPLICATE_COMMENTS = True
@@ -49,18 +52,22 @@ FILTER_AI_COMMENTS = True
 FILTER_SHORT_ENGAGEMENT_COMMENTS = True
 SHORT_ENGAGEMENT_MIN_TOKENS = 10  # drop only when comment has fewer than this many jieba tokens
 SHORT_ENGAGEMENT_MAX_TERM_MENTIONS = 1  # drop if 点赞/赞同/关注 hits exceed this (>1 → 2+)
+FILTER_REPETITION_SPAM_COMMENTS = True
+MAX_REPETITION_TERM_MENTIONS = 7  # drop if any listed term appears more than this (>10 → 11+)
+FILTER_META_DISCUSSION_COMMENTS = True
+META_DISCUSSION_MIN_TERM_MENTIONS = 5  # drop if combined 数据/臆测/捏造/观点/神棍 hits reach this
 MIN_CHUNK_LEN = 3
 MIN_CONSECUTIVE_DUP_RUN = 3
 MIN_TOKEN_FREQ = 2
 FILTER_SINGLE_CHAR_TOKENS = True
-SINGLE_CHAR_TOKENS_FILE = PROJECT_ROOT / "single_char_tokens.txt"
+SINGLE_CHAR_TOKENS_FILE = PREPROCESS_LISTS_DIR / "single_char_tokens.txt"
 SINGLE_CHAR_TOP_PCT = 20
 SINGLE_CHAR_MID_LOW_PCT = 20
 SINGLE_CHAR_MID_HIGH_PCT = 80
 LDA_EXCLUDE_TOKENS = {
     "孩子", "小孩子", "生孩子", "没有", "不想", "不生", "问题", "时候",
 }
-MIN_DOC_FREQ = 10
+MIN_DOC_FREQ = 30
 MAX_DOC_FREQ = 0.8
 KEEP_N = None  # int: keep top-N tokens by frequency; None: use all tokens after preprocessing
 LIKES_COLUMN = "like_count"  # Scraping CSVs; use "numlikes" for comments_oid323836485.csv
@@ -118,6 +125,12 @@ def build_preprocess_config() -> dict:
         "short_engagement_min_tokens": SHORT_ENGAGEMENT_MIN_TOKENS,
         "short_engagement_max_term_mentions": SHORT_ENGAGEMENT_MAX_TERM_MENTIONS,
         "engagement_spam_terms_file": str(ENGAGEMENT_SPAM_TERMS_FILE),
+        "filter_repetition_spam_comments": FILTER_REPETITION_SPAM_COMMENTS,
+        "max_repetition_term_mentions": MAX_REPETITION_TERM_MENTIONS,
+        "repetition_spam_terms_file": str(REPETITION_SPAM_TERMS_FILE),
+        "filter_meta_discussion_comments": FILTER_META_DISCUSSION_COMMENTS,
+        "meta_discussion_min_term_mentions": META_DISCUSSION_MIN_TERM_MENTIONS,
+        "meta_discussion_terms_file": str(META_DISCUSSION_TERMS_FILE),
         "min_chunk_len": MIN_CHUNK_LEN,
         "min_consecutive_dup_run": MIN_CONSECUTIVE_DUP_RUN,
         "min_token_freq": MIN_TOKEN_FREQ,
@@ -192,6 +205,22 @@ def main() -> dict:
             f" (drop if <{SHORT_ENGAGEMENT_MIN_TOKENS} tokens and"
             f" >{SHORT_ENGAGEMENT_MAX_TERM_MENTIONS} 点赞/赞同/关注 hits)"
             if FILTER_SHORT_ENGAGEMENT_COMMENTS
+            else ""
+        )
+    )
+    print(
+        f"  Repetition-spam filter: {'ON' if FILTER_REPETITION_SPAM_COMMENTS else 'OFF'}"
+        + (
+            f" (drop if any listed term appears >{MAX_REPETITION_TERM_MENTIONS} times)"
+            if FILTER_REPETITION_SPAM_COMMENTS
+            else ""
+        )
+    )
+    print(
+        f"  Meta-discussion filter: {'ON' if FILTER_META_DISCUSSION_COMMENTS else 'OFF'}"
+        + (
+            f" (drop if combined 数据/臆测/捏造/观点/神棍 hits ≥{META_DISCUSSION_MIN_TERM_MENTIONS})"
+            if FILTER_META_DISCUSSION_COMMENTS
             else ""
         )
     )

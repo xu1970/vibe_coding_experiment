@@ -3,6 +3,9 @@ import re
 import jieba.posseg as pseg
 import os
 import emoji
+from pathlib import Path
+
+_PREPROCESS_LISTS_DIR = Path(__file__).resolve().parent / "preprocess_lists"
 
 def add_replacements(rules_file, replacement_rules):
     with open(rules_file, 'r', encoding='utf-8') as f:
@@ -127,15 +130,15 @@ def preprocess_chinese_text(text, replacement_rules, mode=''):
     tokens = [token for token in tokens if token!=' ']
     
     # Remove stopwords
-    stopwords = [line.strip() for line in open('stop_words.txt', 'r', encoding='utf-8')] 
+    stopwords = [line.strip() for line in open(_PREPROCESS_LISTS_DIR / 'stop_words.txt', 'r', encoding='utf-8')] 
     # tokens = [token for token in tokens if token not in stopwords]
     
     # Remove adverbs & quantities
-    filtered_words = [line.strip() for line in open('filtered_words.txt', 'r', encoding='utf-8')] 
+    filtered_words = [line.strip() for line in open(_PREPROCESS_LISTS_DIR / 'filtered_words.txt', 'r', encoding='utf-8')] 
     tokens = [token for token in tokens if token not in filtered_words]
     
     # Remove low frequency words
-    low_frequency = [line.strip() for line in open('low_frequency.txt', 'r', encoding='utf-8')] 
+    low_frequency = [line.strip() for line in open(_PREPROCESS_LISTS_DIR / 'low_frequency.txt', 'r', encoding='utf-8')] 
     tokens = [token for token in tokens if token not in low_frequency]
     
     # substitute synonyms

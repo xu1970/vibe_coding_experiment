@@ -23,6 +23,15 @@ from opencc import OpenCC
 from functions import add_replacements, add_words_from_file, replace_w_rules
 
 
+_PROJECT_ROOT = Path(__file__).resolve().parent
+PREPROCESS_LISTS_DIR = _PROJECT_ROOT / "preprocess_lists"
+
+
+def _list_path(filename: str) -> str:
+    """Path to a word/rule list under preprocess_lists/."""
+    return str(PREPROCESS_LISTS_DIR / filename)
+
+
 # ---------------------------------------------------------------------------
 # Default configuration — adjust filters in one place
 # ---------------------------------------------------------------------------
@@ -34,13 +43,13 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "likes_column": "numlikes",   # column for like-based corpus reweighting; None to skip
     "vote_values": None,  # e.g. [1, 2]; None keeps all rows
 
-    # --- Resource files (paths relative to project root or absolute) ---
-    "custom_words_file": "custom_words.txt",
-    "stop_words_file": "stop_words.txt",
-    "filtered_words_file": "filtered_words.txt",
-    "low_frequency_file": "low_frequency.txt",
-    "replacement_rules_file": "replacement_rules2.txt",
-    "megatoken_file": "megatoken.txt",
+    # --- Resource files (under preprocess_lists/) ---
+    "custom_words_file": _list_path("custom_words.txt"),
+    "stop_words_file": _list_path("stop_words.txt"),
+    "filtered_words_file": _list_path("filtered_words.txt"),
+    "low_frequency_file": _list_path("low_frequency.txt"),
+    "replacement_rules_file": _list_path("replacement_rules2.txt"),
+    "megatoken_file": _list_path("megatoken.txt"),
 
     # --- Comment filtering (before tokenization) ---
     "deduplicate_comments": True,
@@ -48,18 +57,24 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "max_links_per_comment": 1,  # drop comments with more than this many webpage links
     "filter_product_sales_comments": True,
     "max_product_term_mentions": 2,  # drop if product/sales term count exceeds this
-    "product_sales_terms_file": "product_sales_terms.txt",
+    "product_sales_terms_file": _list_path("product_sales_terms.txt"),
     "filter_ai_comments": True,
-    "ai_comment_terms_file": "ai_comment_terms.txt",
+    "ai_comment_terms_file": _list_path("ai_comment_terms.txt"),
     "filter_bracket_spam_comments": True,
     "max_bracket_pairs_per_comment": 3,  # drop if <> or 《》 pair count exceeds this
     "filter_blocked_comment_terms": True,
     "max_blocked_term_mentions": 3,  # drop if any listed term appears more than this
-    "blocked_comment_terms_file": "blocked_comment_terms.txt",
+    "blocked_comment_terms_file": _list_path("blocked_comment_terms.txt"),
     "filter_short_engagement_comments": True,
     "short_engagement_min_tokens": 10,  # drop only when jieba token count is below this
     "short_engagement_max_term_mentions": 1,  # drop if listed-term hits exceed this (>1 → 2+)
-    "engagement_spam_terms_file": "engagement_spam_terms.txt",
+    "engagement_spam_terms_file": _list_path("engagement_spam_terms.txt"),
+    "filter_repetition_spam_comments": True,
+    "max_repetition_term_mentions": 10,  # drop if any listed term appears more than this
+    "repetition_spam_terms_file": _list_path("repetition_spam_terms.txt"),
+    "filter_meta_discussion_comments": True,
+    "meta_discussion_min_term_mentions": 5,  # drop if combined listed-term hits reach this
+    "meta_discussion_terms_file": _list_path("meta_discussion_terms.txt"),
 
     # --- Text cleaning ---
     "min_chunk_len": 3,
@@ -69,7 +84,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
 
     # --- Single-character token filter (before LDA vocabulary) ---
     "filter_single_char_tokens": False,
-    "single_char_tokens_file": "single_char_tokens.txt",
+    "single_char_tokens_file": _list_path("single_char_tokens.txt"),
     "single_char_top_pct": 20,       # top N% freq: keep if in single_char_tokens_file
     "single_char_mid_low_pct": 20,   # mid band lower bound (inclusive)
     "single_char_mid_high_pct": 90,  # mid band upper bound (inclusive); keep if POS is adjective
@@ -203,9 +218,13 @@ def _max_single_term_mentions(text: str, terms: set[str]) -> int:
     return max_hits
 
 
-_DEFAULT_BLOCKED_COMMENT_TERMS = {"劳务派遣","秦皇岛高技","胃镜"}
+_DEFAULT_BLOCKED_COMMENT_TERMS = {"劳务派遣","秦皇岛高技","胃镜","我和张先生","贸易逆差","柳比歇夫"}
 
 _DEFAULT_ENGAGEMENT_SPAM_TERMS = {"点赞", "赞同", "关注",'美拍'}
+
+_DEFAULT_REPETITION_SPAM_TERMS = {"不懂", "理想","楼主","自杀率"}
+
+_DEFAULT_META_DISCUSSION_TERMS = {"数据", "臆测", "捏造", "观点", "神棍"}
 
 
 def _jieba_raw_token_count(text: str) -> int:
@@ -269,7 +288,7 @@ def prepare_comments(
     """
     Drop spammy, off-topic, and duplicate comments before tokenization.
 
-    Order: emoji → links → brackets → blocked terms → product-sales → AI → short engagement → dedup.
+    Order: emoji → links → brackets → blocked → product-sales → AI → short engagement → repetition → meta-discussion → dedup.
     If ``likes`` is provided, it is filtered in parallel with ``comments``.
     """
     stats = {
@@ -281,6 +300,8 @@ def prepare_comments(
         "n_dropped_product_sales": 0,
         "n_dropped_ai_generated": 0,
         "n_dropped_short_engagement": 0,
+        "n_dropped_repetition_spam": 0,
+        "n_dropped_meta_discussion": 0,
         "n_dropped_duplicates": 0,
         "n_kept": 0,
     }
@@ -323,7 +344,7 @@ def prepare_comments(
 
     if config.get("filter_blocked_comment_terms", True):
         blocked_terms = _load_terms(
-            config.get("blocked_comment_terms_file", "blocked_comment_terms.txt"),
+            config.get("blocked_comment_terms_file", _list_path("blocked_comment_terms.txt")),
             _DEFAULT_BLOCKED_COMMENT_TERMS,
         )
         max_blocked = config.get("max_blocked_term_mentions", 3)
@@ -339,7 +360,7 @@ def prepare_comments(
 
     if config.get("filter_product_sales_comments", True):
         product_terms = _load_terms(
-            config.get("product_sales_terms_file", "product_sales_terms.txt"),
+            config.get("product_sales_terms_file", _list_path("product_sales_terms.txt")),
             _DEFAULT_PRODUCT_SALES_TERMS,
         )
         max_mentions = config.get("max_product_term_mentions", 2)
@@ -355,7 +376,7 @@ def prepare_comments(
 
     if config.get("filter_ai_comments", True):
         ai_terms = _load_terms(
-            config.get("ai_comment_terms_file", "ai_comment_terms.txt"),
+            config.get("ai_comment_terms_file", _list_path("ai_comment_terms.txt")),
             _DEFAULT_AI_COMMENT_TERMS,
         )
         comments, likes, stats["n_dropped_ai_generated"] = _filter_comments_parallel(
@@ -366,7 +387,7 @@ def prepare_comments(
 
     if config.get("filter_short_engagement_comments", True):
         engagement_terms = _load_terms(
-            config.get("engagement_spam_terms_file", "engagement_spam_terms.txt"),
+            config.get("engagement_spam_terms_file", _list_path("engagement_spam_terms.txt")),
             _DEFAULT_ENGAGEMENT_SPAM_TERMS,
         )
         min_tokens = config.get("short_engagement_min_tokens", 10)
@@ -384,6 +405,38 @@ def prepare_comments(
             comments,
             likes,
             drop_if=_is_short_engagement_spam,
+        )
+
+    if config.get("filter_repetition_spam_comments", True):
+        repetition_terms = _load_terms(
+            config.get("repetition_spam_terms_file", _list_path("repetition_spam_terms.txt")),
+            _DEFAULT_REPETITION_SPAM_TERMS,
+        )
+        max_repetitions = config.get("max_repetition_term_mentions", 10)
+
+        def _has_excessive_repetition(comment: str) -> bool:
+            return _max_single_term_mentions(comment, repetition_terms) > max_repetitions
+
+        comments, likes, stats["n_dropped_repetition_spam"] = _filter_comments_parallel(
+            comments,
+            likes,
+            drop_if=_has_excessive_repetition,
+        )
+
+    if config.get("filter_meta_discussion_comments", True):
+        meta_terms = _load_terms(
+            config.get("meta_discussion_terms_file", _list_path("meta_discussion_terms.txt")),
+            _DEFAULT_META_DISCUSSION_TERMS,
+        )
+        min_mentions = config.get("meta_discussion_min_term_mentions", 5)
+
+        def _is_meta_discussion_spam(comment: str) -> bool:
+            return _count_term_mentions(comment, meta_terms) >= min_mentions
+
+        comments, likes, stats["n_dropped_meta_discussion"] = _filter_comments_parallel(
+            comments,
+            likes,
+            drop_if=_is_meta_discussion_spam,
         )
 
     if config.get("deduplicate_comments", True):
@@ -687,7 +740,7 @@ def filter_single_char_tokens(
     if not config.get("filter_single_char_tokens", False):
         return tokenized_docs, {"n_single_char_dropped": 0, "n_single_char_kept": 0}
 
-    whitelist_path = config.get("single_char_tokens_file", "single_char_tokens.txt")
+    whitelist_path = config.get("single_char_tokens_file", _list_path("single_char_tokens.txt"))
     whitelist: set[str] = set()
     if Path(whitelist_path).exists():
         whitelist = set(_load_word_list(whitelist_path))
