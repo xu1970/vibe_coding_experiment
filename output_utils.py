@@ -99,3 +99,68 @@ def save_top_comments(
                 )
 
     return out_path
+
+
+def save_lda_model(
+    model: LdaModel,
+    *,
+    filename: str | Path = "model/lda.model",
+) -> Path:
+    """
+    Persist a trained Gensim LDA model to disk.
+
+    Gensim writes several sidecar files next to ``filename`` (e.g. the model
+    state and id2word mapping). Reload later with ``LdaModel.load(filename)``.
+    """
+    out_path = _ensure_parent_dir(filename)
+    model.save(str(out_path))
+    return out_path
+
+
+def save_topic_coordinates(
+    model: LdaModel,
+    corpus_tfidf: list[list[tuple[int, int]]],
+    dictionary,
+    *,
+    filename: str | Path = "topic_coordinates.csv",
+    mds: str = "mmds",
+    sort_topics: bool = False,
+) -> Path:
+    """
+    Compute and save the 2D MDS topic coordinates used by pyLDAvis.
+
+    Columns: topic_id, x, y, freq
+
+    ``sort_topics=False`` keeps Gensim's native topic order so ``topic_id``
+    aligns 1-to-1 with the topic numbering in ``topic_tokens.csv`` /
+    ``top_comments.csv``. Set ``sort_topics=True`` to renumber by prevalence
+    (pyLDAvis default), in which case the ids will NOT match those CSVs.
+
+    Requires pyLDAvis (``pip install pyLDAvis``).
+    """
+    try:
+        import pyLDAvis.gensim_models as gensim_vis
+    except ImportError:  # pragma: no cover
+        try:
+            from pyLDAvis import gensim_models as gensim_vis  # type: ignore[attr-defined]
+        except ImportError as exc:  # pragma: no cover
+            raise ImportError(
+                "save_topic_coordinates requires pyLDAvis. Install it with "
+                "`pip install pyLDAvis`."
+            ) from exc
+
+    vis_data = gensim_vis.prepare(
+        model,
+        corpus_tfidf,
+        dictionary,
+        mds=mds,
+        sort_topics=sort_topics,
+    )
+
+    coords = vis_data.topic_coordinates.copy()
+    coords = coords.rename(columns={"topics": "topic_id", "Freq": "freq"})
+    coords = coords[["topic_id", "x", "y", "freq"]].sort_values("topic_id")
+
+    out_path = _ensure_parent_dir(filename)
+    coords.to_csv(out_path, index=False, encoding="utf-8-sig")
+    return out_path

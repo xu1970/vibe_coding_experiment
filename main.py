@@ -9,7 +9,12 @@ from __future__ import annotations
 from pathlib import Path
 
 from lda_utils import LDASettings, print_lda_topics, print_topic_tokens, run_lda_pipeline
-from output_utils import save_top_comments, save_topic_tokens
+from output_utils import (
+    save_lda_model,
+    save_top_comments,
+    save_topic_coordinates,
+    save_topic_tokens,
+)
 from preprocess_corpus import DEFAULT_CONFIG, preprocess_corpus
 
 # =============================================================================
@@ -19,7 +24,7 @@ from preprocess_corpus import DEFAULT_CONFIG, preprocess_corpus
 PROJECT_ROOT = Path(__file__).resolve().parent
 
 DATA_DIR = "/Users/xiangningxu/Documents/vibe_coding/Scraping"
-FILE_PATTERN = "comments_sampled_生育*.csv"
+FILE_PATTERN = "comments_sampled_*育*.csv"
 TEXT_COLUMN = "comment_text"
 VOTE_VALUES = None  # e.g. [1, 2]; None keeps all rows
 
@@ -67,7 +72,7 @@ SINGLE_CHAR_MID_HIGH_PCT = 80
 LDA_EXCLUDE_TOKENS = {
     "孩子", "小孩子", "生孩子", "没有", "不想", "不生", "问题", "时候",
 }
-MIN_DOC_FREQ = 30
+MIN_DOC_FREQ = 50
 MAX_DOC_FREQ = 0.8
 KEEP_N = None  # int: keep top-N tokens by frequency; None: use all tokens after preprocessing
 LIKES_COLUMN = "like_count"  # Scraping CSVs; use "numlikes" for comments_oid323836485.csv
@@ -78,9 +83,9 @@ LIKES_USE_LOG = True  # False: weight = 1 + LIKES_ALPHA * num_likes; True: weigh
 LIKES_ALPHA = 0.1      # used only when LIKES_USE_LOG is False
 
 # LDA hyper-parameters
-NUM_TOPICS = 20
-PASSES = 25
-RANDOM_STATE = 42
+NUM_TOPICS = 19
+PASSES = 20
+RANDOM_STATE = 46
 TOPN_TOPICS_PRINT = 10
 TOPN_TOPIC_TOKENS = 20
 TOPN_DOCS_PER_TOPIC = 7
@@ -91,6 +96,9 @@ NUM_TOPIC_TOKENS = 15
 NUM_TOP_COMMENTS = 10
 TOPIC_TOKENS_FILENAME = OUTPUT_DIR / "topic_tokens.csv"
 TOP_COMMENTS_FILENAME = OUTPUT_DIR / "top_comments.csv"
+LDA_MODEL_FILENAME = OUTPUT_DIR / "model" / "lda.model"
+TOPIC_COORDINATES_FILENAME = OUTPUT_DIR / "topic_coordinates.csv"
+MDS_METHOD = "mmds"  # topic distance projection: 'mmds', 'pcoa', or 'tsne'
 
 
 def build_preprocess_config() -> dict:
@@ -300,8 +308,19 @@ def main() -> dict:
         top_n=NUM_TOP_COMMENTS,
         filename=TOP_COMMENTS_FILENAME,
     )
+    model_path = save_lda_model(lda_model, filename=LDA_MODEL_FILENAME)
+    coordinates_path = save_topic_coordinates(
+        lda_model,
+        lda_result["corpus_tfidf"],
+        dictionary,
+        filename=TOPIC_COORDINATES_FILENAME,
+        mds=MDS_METHOD,
+        sort_topics=False,
+    )
     print(f"  topic tokens: {topic_tokens_path}")
     print(f"  top comments: {top_comments_path}")
+    print(f"  lda model: {model_path}")
+    print(f"  topic coordinates: {coordinates_path}")
 
     return {
         "preprocessed": preprocessed,
@@ -309,6 +328,8 @@ def main() -> dict:
         "outputs": {
             "topic_tokens_csv": topic_tokens_path,
             "top_comments_csv": top_comments_path,
+            "lda_model": model_path,
+            "topic_coordinates_csv": coordinates_path,
         },
     }
 
